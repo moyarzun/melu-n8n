@@ -1,7 +1,8 @@
 version: '3.8'
 services:
   n8n:
-    # n8n 2.41.0 (tag estable verificado vía Docker Hub Registry API el 2026-09-22, fuente: n8n-tag.json)
+    # n8n 2.41.0 (tag estable verificado vía Docker Hub Registry API el 2026-09-22, fuente: n8n-tag.json).
+    # n8n 2.x ignora N8N_PATH; el subpath /n8n/ se implementa vía Tailscale Funnel --set-path.
     image: n8nio/n8n:2.41.0
     container_name: n8n
     restart: unless-stopped
@@ -10,7 +11,6 @@ services:
     environment:
       - GENERIC_TIMEZONE=UTC
       - N8N_PORT=5678
-      - N8N_PATH=/n8n/
       - N8N_EDITOR_BASE_URL=https://melu-n8n.tailef0a9a.ts.net/n8n/
       - N8N_PROTOCOL=https
     volumes:
