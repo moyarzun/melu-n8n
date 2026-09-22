@@ -1,7 +1,8 @@
 version: '3.8'
 services:
   n8n:
-    image: n8nio/n8n:latest
+    # n8n 2.41.0 (tag estable verificado vía Docker Hub Registry API el 2026-09-22, fuente: n8n-tag.json)
+    image: n8nio/n8n:2.41.0
     container_name: n8n
     restart: unless-stopped
     ports:
@@ -9,7 +10,8 @@ services:
     environment:
       - GENERIC_TIMEZONE=UTC
       - N8N_PORT=5678
-      - N8N_EDITOR_BASE_URL=http://your-pi-ip:5678
-      - N8N_PROTOCOL=http
+      - N8N_PATH=/n8n/
+      - N8N_EDITOR_BASE_URL=https://melu-n8n.tailef0a9a.ts.net/n8n/
+      - N8N_PROTOCOL=https
     volumes:
       - ./data:/home/node/.n8n
