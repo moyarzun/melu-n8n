@@ -1,0 +1,9 @@
+{
+  "name": "n8n",
+  "version": "0.0.0",
+  "private": true,
+  "description": "n8n deployment via Docker Compose; this package.json exists only to give twinstrand a stable `npm test` entrypoint that validates docker-compose.yml syntax without spinning up containers.",
+  "scripts": {
+    "test": "docker compose config -q"
+  }
+}
