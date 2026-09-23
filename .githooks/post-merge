@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# post-merge hook: trigger /maintain-verification-skill after merging into main.
+#
+# Detection: a real merge commit landed on the main branch. Fast-forwards
+# are skipped because they don't introduce a new commit into main's history
+# from a feature branch.
+#
+# Action:
+#   1. Re-run scripts/verify.sh from .cursor/skills/verify-n8n-deploy/ to
+#      confirm the merged code didn't break the live stack.
+#   2. Write a marker file at .cursor/notes/maintenance-needed.md that
+#      the next agent invocation reads and uses to invoke
+#      /maintain-verification-skill. The skill itself requires an agent
+#      (source reading, parallel subagents, etc.) — the hook only
+#      verifies behavior, the agent does the doc/harness reconciliation.
+#
+# Disable: set TWS_SKIP_VERIFY=1 to skip the verify.sh run, TWS_NO_NOTIFY=1
+# to skip writing the marker. The hook never fails the merge — by the
+# time it runs, the merge already happened; failure here is informational.
+
+set -u
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+NOTES_DIR="${REPO_ROOT}/.cursor/notes"
+NOTES_FILE="${NOTES_DIR}/maintenance-needed.md"
+VERIFY_SH="/home/moyarzun/.cursor/skills/verify-n8n-deploy/scripts/verify.sh"
+LOG_DIR="/tmp/opencode/twinstrand-merge-hooks"
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+LOG_FILE="${LOG_DIR}/merge-${TS}.log"
+VERIFY_OUT="${LOG_DIR}/merge-${TS}.verify.txt"
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+log() {
+  echo "[post-merge $(date -u +%H:%M:%S)] $*" | tee -a "$LOG_FILE" >&2
+}
+
+# Only act on main
+current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+if [ "$current_branch" != "main" ]; then
+  log "skip: current branch is '$current_branch', not main"
+  exit 0
+fi
+
+# Detect real merge commit (skip fast-forward).
+# %H %P puts a space between commit hash and parent hashes so wc/awk can
+# count parents — %H%P concatenates them and looks like a single token.
+parents=$(git log -1 --pretty='%H %P' 2>/dev/null | wc -w)
+if [ "${parents:-1}" -lt 3 ]; then
+  log "skip: fast-forward (no merge commit, $parents fields in HEAD)"
+  exit 0
+fi
+
+# Identify merged-in branches (for the note)
+merge_refs=$(git log -1 --pretty=%P 2>/dev/null \
+  | tr ' ' '\n' \
+  | grep -v '^$' \
+  | xargs -n1 -I{} git name-rev --name-only {} 2>/dev/null \
+  | grep -v '\^' | sort -u)
+
+log "merge to main detected; merged refs: ${merge_refs:-<unknown>}"
+
+# Run verification
+VERIFY_RC=0
+if [ "${TWS_SKIP_VERIFY:-0}" = "1" ]; then
+  log "verify.sh: skipped (TWS_SKIP_VERIFY=1)"
+elif [ ! -x "$VERIFY_SH" ]; then
+  log "verify.sh: skipped (not found or not executable: $VERIFY_SH)"
+else
+  log "verify.sh: running..."
+  if bash "$VERIFY_SH" > "$VERIFY_OUT" 2>&1; then
+    log "verify.sh: PASS"
+  else
+    VERIFY_RC=$?
+    log "verify.sh: FAIL (exit $VERIFY_RC)"
+  fi
+fi
+
+# Write marker for the next agent
+if [ "${TWS_NO_NOTIFY:-0}" != "1" ]; then
+  mkdir -p "$NOTES_DIR" 2>/dev/null || true
+  MERGE_SUMMARY=$(git log -1 --pretty='%h %s' 2>/dev/null || echo "<unknown>")
+  {
+    echo "# Maintain verification skill — please run"
+    echo ""
+    echo "A merge into \`main\` just landed."
+    echo ""
+    echo "- **When:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "- **Merge commit:** \`${MERGE_SUMMARY}\`"
+    echo "- **Merged refs:** ${merge_refs:-<unknown>}"
+    echo "- **Verification result:** $([ $VERIFY_RC -eq 0 ] && echo "PASS" || echo "FAIL (exit $VERIFY_RC)")"
+    echo "- **Verification log:** ${VERIFY_OUT}"
+    echo ""
+    echo "## Action"
+    echo ""
+    echo "Load the \`/maintain-verification-skill\` skill and run it against this repo."
+    echo "It will reconcile \`.cursor/skills/verify-n8n-deploy/features/\` against the"
+    echo "current state of the app, fix any drift in the map, and re-run every feature."
+    echo ""
+    echo "Until that runs, treat the verification result above as provisional:"
+    echo "PASS means behavior is intact; the doc/harness may still have drifted."
+    echo "FAIL means the live stack broke — investigate \`${VERIFY_OUT}\` first."
+    echo ""
+    echo "## Cleanup"
+    echo ""
+    echo "After running the skill, delete this file:"
+    echo "  rm ${NOTES_FILE}"
+  } > "$NOTES_FILE"
+  log "marker written: ${NOTES_FILE}"
+fi
+
+# Always exit 0 — the merge is done; failure is informational only.
+exit 0
