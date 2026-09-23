@@ -1,1 +1,631 @@
-{"id":"awBerTT0gLmPB3LM","name":"Email Classifier (Jev)","description":null,"active":true,"activeVersionId":"0e41197a-d10b-4c63-8cb8-1b9939d16c1b","createdAt":"2026-09-23T20:17:33.842Z","updatedAt":"2026-09-23T20:33:40.854Z","isArchived":false,"versionId":"0e41197a-d10b-4c63-8cb8-1b9939d16c1b","versionCounter":11,"sourceWorkflowId":null,"triggerCount":1,"nodes":[{"id":"webhook-trigger","name":"Webhook","webhookId":"dcd390e8-e41d-41c7-9c07-a3404d6e07d6","type":"n8n-nodes-base.webhook","typeVersion":2,"position":[200,300],"parameters":{"httpMethod":"POST","path":"email-classifier","responseMode":"responseNode","responseData":"allEntries","options":{}}},{"id":"extract-fields","name":"Extract Email Fields","type":"n8n-nodes-base.set","typeVersion":3.4,"position":[400,300],"parameters":{"assignments":{"assignments":[{"name":"subject","value":"={{ $json.body.subject ?? $json.subject ?? '' }}","type":"string"},{"name":"body","value":"={{ $json.body.body ?? $json.body ?? '' }}","type":"string"},{"name":"from","value":"={{ $json.body.from ?? $json.from ?? '' }}","type":"string"},{"name":"headers","value":"={{ $json.body.headers ?? $json.headers ?? {} }}","type":"object"}]},"options":{}}},{"id":"build-jev-body","name":"Build Jev Body","type":"n8n-nodes-base.code","typeVersion":2,"position":[500,300],"parameters":{"mode":"runOnceForAllItems","language":"javaScript","jsCode":"const inp = $input.first().json;\nconst subj = String((inp && inp.subject) || '').substring(0, 200);\nconst body = String((inp && inp.body) || '').substring(0, 800);\nconst from = String((inp && inp.from) || '').substring(0, 200);\nconst out = {\n  json: {\n    jevBody: JSON.stringify({\n      model: 'typesafe/jev-1.13',\n      state: { context: 'Subject: ' + subj + ' | From: ' + from + ' | Body: ' + body },\n      questions: {\n        q1: { type: 'choice', prompt: 'Is this email spam?', options: ['spam','not_spam'], criteria: { spam: { weight: 1.0 }, not_spam: { weight: 1.0 } }, instructions: 'Analyze subject, sender, content. Spam if unsolicited/promotional/phishing.' },\n        q2: { type: 'score', prompt: 'How urgent? (0 not urgent, 1 extremely urgent)', min: 0, max: 1, criteria: [{ weight: 1.0 }], instructions: 'Consider time-sensitive keywords.' },\n        q3: { type: 'choice', prompt: 'What category?', options: ['work','personal','finance','other'], criteria: { work: { weight: 1.0 }, personal: { weight: 1.0 }, finance: { weight: 1.0 }, other: { weight: 1.0 } }, instructions: 'work=job; personal=social/family; finance=money; other=rest.' }\n      }\n    })\n  }\n};\nreturn out;"}},{"id":"jev-classify","name":"Jev Classify","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[600,300],"parameters":{"method":"POST","url":"https://openrouter.ai/api/alpha/decisions","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"Bearer ${OPENROUTER_API_KEY}"},{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ $json.jevBody }}","options":{}}},{"id":"parse-jev","name":"Parse Jev","type":"n8n-nodes-base.set","typeVersion":3.4,"position":[800,300],"parameters":{"assignments":{"assignments":[{"name":"is_spam","value":"={{ $json.answers?.q1?.choice ?? 'unknown' }}","type":"string"},{"name":"urgency","value":"={{ $json.answers?.q2?.score ?? 0 }}","type":"number"},{"name":"category","value":"={{ $json.answers?.q3?.choice ?? 'other' }}","type":"string"},{"name":"model","value":"={{ $json.model ?? 'unknown' }}","type":"string"}]},"options":{}}},{"id":"switch-route","name":"Switch Route","type":"n8n-nodes-base.switch","typeVersion":3.2,"position":[1000,300],"parameters":{"rules":{"values":[{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"is-spam","leftValue":"={{ $json.is_spam }}","rightValue":"spam","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"drop_quarantine"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"urgent","leftValue":"={{ $json.urgency }}","rightValue":0.7,"operator":{"type":"number","operation":"gte"}},{"id":"not-spam","leftValue":"={{ $json.is_spam }}","rightValue":"not_spam","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"urgent"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"work","leftValue":"={{ $json.category }}","rightValue":"work","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"work"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"personal","leftValue":"={{ $json.category }}","rightValue":"personal","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"personal"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"finance","leftValue":"={{ $json.category }}","rightValue":"finance","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"finance"}]},"options":{}}},{"id":"stub-quarantine","name":"Stub: Quarantine (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,100],"parameters":{"method":"POST","url":"https://webhook.site/unique-quarantine-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'drop_quarantine', reason: $json.is_spam, payload: $json } }}","options":{}}},{"id":"stub-urgent","name":"Stub: Urgent (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,200],"parameters":{"method":"POST","url":"https://webhook.site/unique-urgent-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'urgent', urgency: $json.urgency, payload: $json } }}","options":{}}},{"id":"stub-work","name":"Stub: Work (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,300],"parameters":{"method":"POST","url":"https://webhook.site/unique-work-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'work', payload: $json } }}","options":{}}},{"id":"stub-personal","name":"Stub: Personal (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,400],"parameters":{"method":"POST","url":"https://webhook.site/unique-personal-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'personal', payload: $json } }}","options":{}}},{"id":"stub-finance","name":"Stub: Finance (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,500],"parameters":{"method":"POST","url":"https://webhook.site/unique-finance-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'finance', payload: $json } }}","options":{}}},{"id":"respond-ok","name":"Respond OK","type":"n8n-nodes-base.respondToWebhook","typeVersion":1.1,"position":[1400,300],"parameters":{"respondWith":"json","responseBody":"={{ { status: 'received', route: $json.route, urgency: $json.urgency, is_spam: $json.is_spam, category: $json.category } }}","options":{}}}],"connections":{"Webhook":{"main":[[{"node":"Extract Email Fields","type":"main","index":0}]]},"Extract Email Fields":{"main":[[{"node":"Build Jev Body","type":"main","index":0}]]},"Jev Classify":{"main":[[{"node":"Parse Jev","type":"main","index":0}]]},"Parse Jev":{"main":[[{"node":"Switch Route","type":"main","index":0}]]},"Build Jev Body":{"main":[[{"node":"Jev Classify","type":"main","index":0}]]},"Switch Route":{"main":[[{"node":"Stub: Quarantine (webhook.site)","type":"main","index":0}],[{"node":"Stub: Urgent (webhook.site)","type":"main","index":0}],[{"node":"Stub: Work (webhook.site)","type":"main","index":0}],[{"node":"Stub: Personal (webhook.site)","type":"main","index":0}],[{"node":"Stub: Finance (webhook.site)","type":"main","index":0}]]},"Stub: Quarantine (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Urgent (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Work (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Personal (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Finance (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]}},"nodeGroups":[],"settings":{"executionOrder":"v1"},"staticData":null,"pinData":null,"meta":null,"tags":[],"shared":[{"role":"workflow:owner","workflowId":"awBerTT0gLmPB3LM","projectId":"8o5edBwlifJkaYNY","project":{"id":"8o5edBwlifJkaYNY","name":"Mauricio Oyarzun <mauricio2141@gmail.com>","type":"personal","icon":null,"description":null,"customTelemetryTags":[],"creatorId":"ee6b48b3-3624-46bc-b15a-6d47586eb7a9","createdAt":"2026-03-03T22:11:49.917Z","updatedAt":"2026-09-23T12:30:13.443Z"},"createdAt":"2026-09-23T20:17:33.877Z","updatedAt":"2026-09-23T20:17:33.877Z"}],"activeVersion":{"versionId":"0e41197a-d10b-4c63-8cb8-1b9939d16c1b","workflowId":"awBerTT0gLmPB3LM","nodes":[{"id":"webhook-trigger","name":"Webhook","webhookId":"dcd390e8-e41d-41c7-9c07-a3404d6e07d6","type":"n8n-nodes-base.webhook","typeVersion":2,"position":[200,300],"parameters":{"httpMethod":"POST","path":"email-classifier","responseMode":"responseNode","responseData":"allEntries","options":{}}},{"id":"extract-fields","name":"Extract Email Fields","type":"n8n-nodes-base.set","typeVersion":3.4,"position":[400,300],"parameters":{"assignments":{"assignments":[{"name":"subject","value":"={{ $json.body.subject ?? $json.subject ?? '' }}","type":"string"},{"name":"body","value":"={{ $json.body.body ?? $json.body ?? '' }}","type":"string"},{"name":"from","value":"={{ $json.body.from ?? $json.from ?? '' }}","type":"string"},{"name":"headers","value":"={{ $json.body.headers ?? $json.headers ?? {} }}","type":"object"}]},"options":{}}},{"id":"build-jev-body","name":"Build Jev Body","type":"n8n-nodes-base.code","typeVersion":2,"position":[500,300],"parameters":{"mode":"runOnceForAllItems","language":"javaScript","jsCode":"const inp = $input.first().json;\nconst subj = String((inp && inp.subject) || '').substring(0, 200);\nconst body = String((inp && inp.body) || '').substring(0, 800);\nconst from = String((inp && inp.from) || '').substring(0, 200);\nconst out = {\n  json: {\n    jevBody: JSON.stringify({\n      model: 'typesafe/jev-1.13',\n      state: { context: 'Subject: ' + subj + ' | From: ' + from + ' | Body: ' + body },\n      questions: {\n        q1: { type: 'choice', prompt: 'Is this email spam?', options: ['spam','not_spam'], criteria: { spam: { weight: 1.0 }, not_spam: { weight: 1.0 } }, instructions: 'Analyze subject, sender, content. Spam if unsolicited/promotional/phishing.' },\n        q2: { type: 'score', prompt: 'How urgent? (0 not urgent, 1 extremely urgent)', min: 0, max: 1, criteria: [{ weight: 1.0 }], instructions: 'Consider time-sensitive keywords.' },\n        q3: { type: 'choice', prompt: 'What category?', options: ['work','personal','finance','other'], criteria: { work: { weight: 1.0 }, personal: { weight: 1.0 }, finance: { weight: 1.0 }, other: { weight: 1.0 } }, instructions: 'work=job; personal=social/family; finance=money; other=rest.' }\n      }\n    })\n  }\n};\nreturn out;"}},{"id":"jev-classify","name":"Jev Classify","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[600,300],"parameters":{"method":"POST","url":"https://openrouter.ai/api/alpha/decisions","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"Bearer ${OPENROUTER_API_KEY}"},{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ $json.jevBody }}","options":{}}},{"id":"parse-jev","name":"Parse Jev","type":"n8n-nodes-base.set","typeVersion":3.4,"position":[800,300],"parameters":{"assignments":{"assignments":[{"name":"is_spam","value":"={{ $json.answers?.q1?.choice ?? 'unknown' }}","type":"string"},{"name":"urgency","value":"={{ $json.answers?.q2?.score ?? 0 }}","type":"number"},{"name":"category","value":"={{ $json.answers?.q3?.choice ?? 'other' }}","type":"string"},{"name":"model","value":"={{ $json.model ?? 'unknown' }}","type":"string"}]},"options":{}}},{"id":"switch-route","name":"Switch Route","type":"n8n-nodes-base.switch","typeVersion":3.2,"position":[1000,300],"parameters":{"rules":{"values":[{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"is-spam","leftValue":"={{ $json.is_spam }}","rightValue":"spam","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"drop_quarantine"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"urgent","leftValue":"={{ $json.urgency }}","rightValue":0.7,"operator":{"type":"number","operation":"gte"}},{"id":"not-spam","leftValue":"={{ $json.is_spam }}","rightValue":"not_spam","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"urgent"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"work","leftValue":"={{ $json.category }}","rightValue":"work","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"work"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"personal","leftValue":"={{ $json.category }}","rightValue":"personal","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"personal"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict"},"conditions":[{"id":"finance","leftValue":"={{ $json.category }}","rightValue":"finance","operator":{"type":"string","operation":"equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"finance"}]},"options":{}}},{"id":"stub-quarantine","name":"Stub: Quarantine (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,100],"parameters":{"method":"POST","url":"https://webhook.site/unique-quarantine-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'drop_quarantine', reason: $json.is_spam, payload: $json } }}","options":{}}},{"id":"stub-urgent","name":"Stub: Urgent (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,200],"parameters":{"method":"POST","url":"https://webhook.site/unique-urgent-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'urgent', urgency: $json.urgency, payload: $json } }}","options":{}}},{"id":"stub-work","name":"Stub: Work (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,300],"parameters":{"method":"POST","url":"https://webhook.site/unique-work-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'work', payload: $json } }}","options":{}}},{"id":"stub-personal","name":"Stub: Personal (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,400],"parameters":{"method":"POST","url":"https://webhook.site/unique-personal-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'personal', payload: $json } }}","options":{}}},{"id":"stub-finance","name":"Stub: Finance (webhook.site)","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1200,500],"parameters":{"method":"POST","url":"https://webhook.site/unique-finance-id","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Content-Type","value":"application/json"}]},"sendBody":true,"specifyBody":"json","jsonBody":"={{ { route: 'finance', payload: $json } }}","options":{}}},{"id":"respond-ok","name":"Respond OK","type":"n8n-nodes-base.respondToWebhook","typeVersion":1.1,"position":[1400,300],"parameters":{"respondWith":"json","responseBody":"={{ { status: 'received', route: $json.route, urgency: $json.urgency, is_spam: $json.is_spam, category: $json.category } }}","options":{}}}],"connections":{"Webhook":{"main":[[{"node":"Extract Email Fields","type":"main","index":0}]]},"Extract Email Fields":{"main":[[{"node":"Build Jev Body","type":"main","index":0}]]},"Jev Classify":{"main":[[{"node":"Parse Jev","type":"main","index":0}]]},"Parse Jev":{"main":[[{"node":"Switch Route","type":"main","index":0}]]},"Build Jev Body":{"main":[[{"node":"Jev Classify","type":"main","index":0}]]},"Switch Route":{"main":[[{"node":"Stub: Quarantine (webhook.site)","type":"main","index":0}],[{"node":"Stub: Urgent (webhook.site)","type":"main","index":0}],[{"node":"Stub: Work (webhook.site)","type":"main","index":0}],[{"node":"Stub: Personal (webhook.site)","type":"main","index":0}],[{"node":"Stub: Finance (webhook.site)","type":"main","index":0}]]},"Stub: Quarantine (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Urgent (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Work (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Personal (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]},"Stub: Finance (webhook.site)":{"main":[[{"node":"Respond OK","type":"main","index":0}]]}},"nodeGroups":[],"authors":"Mauricio Oyarzun","name":null,"description":null,"autosaved":false,"createdAt":"2026-09-23T20:33:40.859Z","updatedAt":"2026-09-23T20:33:40.859Z","workflowPublishHistory":[{"id":19,"workflowId":"awBerTT0gLmPB3LM","versionId":"0e41197a-d10b-4c63-8cb8-1b9939d16c1b","event":"activated","userId":"ee6b48b3-3624-46bc-b15a-6d47586eb7a9","createdAt":"2026-09-23T20:33:40.974Z"}]}}
+{
+  "id": "awBerTT0gLmPB3LM",
+  "name": "Email Classifier (Jev)",
+  "description": null,
+  "active": true,
+  "activeVersionId": "d401806c-2023-4688-be40-6cd9232f7817",
+  "createdAt": "2026-09-23T20:17:33.842Z",
+  "updatedAt": "2026-09-24T04:34:15.425Z",
+  "isArchived": false,
+  "versionId": "d401806c-2023-4688-be40-6cd9232f7817",
+  "versionCounter": 18,
+  "sourceWorkflowId": null,
+  "triggerCount": 2,
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "webhookId": "dcd390e8-e41d-41c7-9c07-a3404d6e07d6",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "email-classifier",
+        "responseMode": "responseNode",
+        "responseData": "allEntries",
+        "options": {}
+      }
+    },
+    {
+      "id": "extract-fields",
+      "name": "Extract Email Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        400,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "subject",
+              "value": "={{ $json.body?.subject ?? $json.subject ?? '' }}",
+              "type": "string"
+            },
+            {
+              "name": "body",
+              "value": "={{ $json.body?.body ?? $json.text ?? $json.textPlain ?? $json.html ?? '' }}",
+              "type": "string"
+            },
+            {
+              "name": "from",
+              "value": "={{ $json.body?.from ?? $json.from?.value?.[0]?.address ?? $json.from ?? '' }}",
+              "type": "string"
+            },
+            {
+              "name": "headers",
+              "value": "={{ $json.body?.headers ?? {} }}",
+              "type": "object"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "build-jev-body",
+      "name": "Build Jev Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const inp = $input.first().json;\nconst subj = String((inp && inp.subject) || '').substring(0, 200);\nconst body = String((inp && inp.body) || '').substring(0, 800);\nconst from = String((inp && inp.from) || '').substring(0, 200);\nconst out = {\n  json: {\n    jevBody: JSON.stringify({\n      model: 'typesafe/jev-1.13',\n      state: { context: 'Subject: ' + subj + ' | From: ' + from + ' | Body: ' + body },\n      questions: {\n        q1: { type: 'choice', prompt: 'Is this email spam?', options: ['spam','not_spam'], criteria: { spam: { weight: 1.0 }, not_spam: { weight: 1.0 } }, instructions: 'Analyze subject, sender, content. Spam if unsolicited/promotional/phishing.' },\n        q2: { type: 'score', prompt: 'How urgent? (0 not urgent, 1 extremely urgent)', min: 0, max: 1, criteria: [{ weight: 1.0 }], instructions: 'Consider time-sensitive keywords.' },\n        q3: { type: 'choice', prompt: 'What category?', options: ['work','personal','finance','other'], criteria: { work: { weight: 1.0 }, personal: { weight: 1.0 }, finance: { weight: 1.0 }, other: { weight: 1.0 } }, instructions: 'work=job; personal=social/family; finance=money; other=rest.' }\n      }\n    })\n  }\n};\nreturn out;"
+      }
+    },
+    {
+      "id": "jev-classify",
+      "name": "Jev Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/alpha/decisions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer OPENROUTER_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.jevBody }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-jev",
+      "name": "Parse Jev",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "is_spam",
+              "value": "={{ $json.answers?.q1?.choice ?? 'unknown' }}",
+              "type": "string"
+            },
+            {
+              "name": "urgency",
+              "value": "={{ $json.answers?.q2?.score ?? 0 }}",
+              "type": "number"
+            },
+            {
+              "name": "category",
+              "value": "={{ $json.answers?.q3?.choice ?? 'other' }}",
+              "type": "string"
+            },
+            {
+              "name": "model",
+              "value": "={{ $json.model ?? 'unknown' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'received', route: $json.route, urgency: $json.urgency, is_spam: $json.is_spam, category: $json.category } }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "imap-trigger",
+      "name": "Email Trigger (IMAP)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        500
+      ],
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "downloadAttachments": false,
+        "format": "simple",
+        "options": {
+          "folder": "INBOX",
+          "searchCriteria": "UNSEEN",
+          "downloadAttachments": false
+        }
+      },
+      "credentials": {
+        "imap": {
+          "id": "kSNNVqVv9IVGZQja",
+          "name": "Gmail IMAP (mauricio2141)"
+        }
+      }
+    },
+    {
+      "id": "apply-gmail-labels",
+      "name": "Apply Gmail Labels",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Apply Gmail labels via IMAP STORE +X-GM-LABELS.SILENT\n// Credentials hardcoded for now (TODO: move to n8n credential via helpers.getCredentials when fixed)\nconst IMAP_USER = '${IMAP_USER}';\nconst IMAP_PASSWORD = '${IMAP_APP_PASSWORD}';\nconst IMAP_HOST = 'imap.gmail.com';\nconst IMAP_PORT = 993;\n\nconst item = $input.first();\nconst data = item.json;\nconst is_spam = data.is_spam;\nconst urgency = data.urgency;\nconst category = data.category;\n\nconst labels = [];\nif (is_spam === 'spam') labels.push('Spam');\nif (typeof urgency === 'number' && urgency >= 0.7) labels.push('Urgent');\nif (category === 'work') labels.push('Work');\nelse if (category === 'personal') labels.push('Personal');\nelse if (category === 'finance') labels.push('Finance');\nelse if (category === 'other') labels.push('Other');\n\nconst uid = data.messageUid || data.uid || (item.binary && item.binary.messageUid);\n\nif (!uid) {\n  return [{\n    json: {\n      ...data,\n      _labels_applied: [],\n      _labels_skipped: labels,\n      _skip_reason: 'no_uid_webhook_path',\n    },\n  }];\n}\n\nconst tls = require('tls');\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n\nconst imapCommand = (socket, tag, command) => new Promise((resolve, reject) => {\n  socket.write(tag + ' ' + command + '\\r\\n');\n  const onData = (chunk) => {\n    let text = chunk.toString();\n    let idx;\n    while ((idx = text.indexOf('\\r\\n')) >= 0) {\n      const line = text.substring(0, idx);\n      const rest = text.substring(idx + 2);\n      if (line.startsWith('* ') || line.startsWith('+ ')) {\n        text = rest;\n        if (text.length > 0) continue;\n        return;\n      }\n      const m = line.match(/^([A-Z]\\d+) (OK|NO|BAD)(.*)?$/);\n      if (m && m[1] === tag) {\n        socket.off('data', onData);\n        if (m[2] === 'OK') resolve();\n        else reject(new Error('IMAP ' + m[2] + (m[3] || '')));\n        return;\n      }\n      text = rest;\n      if (text.length > 0) continue;\n      return;\n    }\n  };\n  socket.on('data', onData);\n});\n\nconst socket = tls.connect({ host: IMAP_HOST, port: IMAP_PORT, rejectUnauthorized: true });\nconst result = { uid, applied: [], skipped: labels.slice() };\ntry {\n  await new Promise((resolve, reject) => {\n    socket.once('error', reject);\n    socket.once('connect', resolve);\n  });\n  await sleep(200);\n  const authPayload = Buffer.concat([Buffer.from('\\0' + IMAP_USER + '\\0' + IMAP_PASSWORD)]).toString('base64');\n  await imapCommand(socket, 'A001', 'AUTHENTICATE PLAIN ' + authPayload);\n  await sleep(300);\n  await imapCommand(socket, 'A002', 'SELECT INBOX');\n  await sleep(200);\n  if (labels.length > 0) {\n    const labelsList = labels.map((l) => '\"' + l + '\"').join(' ');\n    await imapCommand(socket, 'A003', 'UID STORE ' + uid + ' +X-GM-LABELS.SILENT (' + labelsList + ')');\n    await sleep(200);\n    result.applied = labels.slice();\n    result.skipped = [];\n  }\n  await imapCommand(socket, 'A004', 'UID STORE ' + uid + ' +FLAGS.SILENT (\\\\Seen)');\n  await sleep(200);\n  await imapCommand(socket, 'A005', 'LOGOUT');\n} catch (e) {\n  result.error = e.message;\n} finally {\n  socket.end();\n}\n\nreturn [{\n  json: {\n    ...data,\n    _labels_applied: result.applied,\n    _labels_skipped: result.skipped,\n    _uid: uid,\n    _im_error: result.error || null,\n  },\n}];"
+      },
+      "credentials": {
+        "imap": {
+          "id": "kSNNVqVv9IVGZQja",
+          "name": "Gmail IMAP (mauricio2141)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Email Fields": {
+      "main": [
+        [
+          {
+            "node": "Build Jev Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Jev Body": {
+      "main": [
+        [
+          {
+            "node": "Jev Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jev Classify": {
+      "main": [
+        [
+          {
+            "node": "Parse Jev",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Jev": {
+      "main": [
+        [
+          {
+            "node": "Apply Gmail Labels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Gmail Labels": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "nodeGroups": [],
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {
+    "node:Email Trigger (IMAP)": {
+      "lastMessageUid": 95864
+    }
+  },
+  "pinData": null,
+  "meta": null,
+  "tags": [],
+  "shared": [
+    {
+      "role": "workflow:owner",
+      "workflowId": "awBerTT0gLmPB3LM",
+      "projectId": "8o5edBwlifJkaYNY",
+      "project": {
+        "id": "8o5edBwlifJkaYNY",
+        "name": "Mauricio Oyarzun <${IMAP_USER}>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "customTelemetryTags": [],
+        "creatorId": "ee6b48b3-3624-46bc-b15a-6d47586eb7a9",
+        "createdAt": "2026-03-03T22:11:49.917Z",
+        "updatedAt": "2026-09-23T12:30:13.443Z"
+      },
+      "createdAt": "2026-09-23T20:17:33.877Z",
+      "updatedAt": "2026-09-23T20:17:33.877Z"
+    }
+  ],
+  "activeVersion": {
+    "versionId": "d401806c-2023-4688-be40-6cd9232f7817",
+    "workflowId": "awBerTT0gLmPB3LM",
+    "nodes": [
+      {
+        "id": "webhook-trigger",
+        "name": "Webhook",
+        "webhookId": "dcd390e8-e41d-41c7-9c07-a3404d6e07d6",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "email-classifier",
+          "responseMode": "responseNode",
+          "responseData": "allEntries",
+          "options": {}
+        }
+      },
+      {
+        "id": "extract-fields",
+        "name": "Extract Email Fields",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          400,
+          300
+        ],
+        "parameters": {
+          "assignments": {
+            "assignments": [
+              {
+                "name": "subject",
+                "value": "={{ $json.body?.subject ?? $json.subject ?? '' }}",
+                "type": "string"
+              },
+              {
+                "name": "body",
+                "value": "={{ $json.body?.body ?? $json.text ?? $json.textPlain ?? $json.html ?? '' }}",
+                "type": "string"
+              },
+              {
+                "name": "from",
+                "value": "={{ $json.body?.from ?? $json.from?.value?.[0]?.address ?? $json.from ?? '' }}",
+                "type": "string"
+              },
+              {
+                "name": "headers",
+                "value": "={{ $json.body?.headers ?? {} }}",
+                "type": "object"
+              }
+            ]
+          },
+          "options": {}
+        }
+      },
+      {
+        "id": "build-jev-body",
+        "name": "Build Jev Body",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          500,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "language": "javaScript",
+          "jsCode": "const inp = $input.first().json;\nconst subj = String((inp && inp.subject) || '').substring(0, 200);\nconst body = String((inp && inp.body) || '').substring(0, 800);\nconst from = String((inp && inp.from) || '').substring(0, 200);\nconst out = {\n  json: {\n    jevBody: JSON.stringify({\n      model: 'typesafe/jev-1.13',\n      state: { context: 'Subject: ' + subj + ' | From: ' + from + ' | Body: ' + body },\n      questions: {\n        q1: { type: 'choice', prompt: 'Is this email spam?', options: ['spam','not_spam'], criteria: { spam: { weight: 1.0 }, not_spam: { weight: 1.0 } }, instructions: 'Analyze subject, sender, content. Spam if unsolicited/promotional/phishing.' },\n        q2: { type: 'score', prompt: 'How urgent? (0 not urgent, 1 extremely urgent)', min: 0, max: 1, criteria: [{ weight: 1.0 }], instructions: 'Consider time-sensitive keywords.' },\n        q3: { type: 'choice', prompt: 'What category?', options: ['work','personal','finance','other'], criteria: { work: { weight: 1.0 }, personal: { weight: 1.0 }, finance: { weight: 1.0 }, other: { weight: 1.0 } }, instructions: 'work=job; personal=social/family; finance=money; other=rest.' }\n      }\n    })\n  }\n};\nreturn out;"
+        }
+      },
+      {
+        "id": "jev-classify",
+        "name": "Jev Classify",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          600,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://openrouter.ai/api/alpha/decisions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer OPENROUTER_API_KEY"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json.jevBody }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "parse-jev",
+        "name": "Parse Jev",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          800,
+          300
+        ],
+        "parameters": {
+          "assignments": {
+            "assignments": [
+              {
+                "name": "is_spam",
+                "value": "={{ $json.answers?.q1?.choice ?? 'unknown' }}",
+                "type": "string"
+              },
+              {
+                "name": "urgency",
+                "value": "={{ $json.answers?.q2?.score ?? 0 }}",
+                "type": "number"
+              },
+              {
+                "name": "category",
+                "value": "={{ $json.answers?.q3?.choice ?? 'other' }}",
+                "type": "string"
+              },
+              {
+                "name": "model",
+                "value": "={{ $json.model ?? 'unknown' }}",
+                "type": "string"
+              }
+            ]
+          },
+          "options": {}
+        }
+      },
+      {
+        "id": "respond-ok",
+        "name": "Respond OK",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1400,
+          300
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { status: 'received', route: $json.route, urgency: $json.urgency, is_spam: $json.is_spam, category: $json.category } }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "imap-trigger",
+        "name": "Email Trigger (IMAP)",
+        "type": "n8n-nodes-base.emailReadImap",
+        "typeVersion": 2.2,
+        "position": [
+          200,
+          500
+        ],
+        "parameters": {
+          "mailbox": "INBOX",
+          "postProcessAction": "read",
+          "downloadAttachments": false,
+          "format": "simple",
+          "options": {
+            "folder": "INBOX",
+            "searchCriteria": "UNSEEN",
+            "downloadAttachments": false
+          }
+        },
+        "credentials": {
+          "imap": {
+            "id": "kSNNVqVv9IVGZQja",
+            "name": "Gmail IMAP (mauricio2141)"
+          }
+        }
+      },
+      {
+        "id": "apply-gmail-labels",
+        "name": "Apply Gmail Labels",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1000,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "language": "javaScript",
+          "jsCode": "// Apply Gmail labels via IMAP STORE +X-GM-LABELS.SILENT\n// Credentials hardcoded for now (TODO: move to n8n credential via helpers.getCredentials when fixed)\nconst IMAP_USER = '${IMAP_USER}';\nconst IMAP_PASSWORD = '${IMAP_APP_PASSWORD}';\nconst IMAP_HOST = 'imap.gmail.com';\nconst IMAP_PORT = 993;\n\nconst item = $input.first();\nconst data = item.json;\nconst is_spam = data.is_spam;\nconst urgency = data.urgency;\nconst category = data.category;\n\nconst labels = [];\nif (is_spam === 'spam') labels.push('Spam');\nif (typeof urgency === 'number' && urgency >= 0.7) labels.push('Urgent');\nif (category === 'work') labels.push('Work');\nelse if (category === 'personal') labels.push('Personal');\nelse if (category === 'finance') labels.push('Finance');\nelse if (category === 'other') labels.push('Other');\n\nconst uid = data.messageUid || data.uid || (item.binary && item.binary.messageUid);\n\nif (!uid) {\n  return [{\n    json: {\n      ...data,\n      _labels_applied: [],\n      _labels_skipped: labels,\n      _skip_reason: 'no_uid_webhook_path',\n    },\n  }];\n}\n\nconst tls = require('tls');\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n\nconst imapCommand = (socket, tag, command) => new Promise((resolve, reject) => {\n  socket.write(tag + ' ' + command + '\\r\\n');\n  const onData = (chunk) => {\n    let text = chunk.toString();\n    let idx;\n    while ((idx = text.indexOf('\\r\\n')) >= 0) {\n      const line = text.substring(0, idx);\n      const rest = text.substring(idx + 2);\n      if (line.startsWith('* ') || line.startsWith('+ ')) {\n        text = rest;\n        if (text.length > 0) continue;\n        return;\n      }\n      const m = line.match(/^([A-Z]\\d+) (OK|NO|BAD)(.*)?$/);\n      if (m && m[1] === tag) {\n        socket.off('data', onData);\n        if (m[2] === 'OK') resolve();\n        else reject(new Error('IMAP ' + m[2] + (m[3] || '')));\n        return;\n      }\n      text = rest;\n      if (text.length > 0) continue;\n      return;\n    }\n  };\n  socket.on('data', onData);\n});\n\nconst socket = tls.connect({ host: IMAP_HOST, port: IMAP_PORT, rejectUnauthorized: true });\nconst result = { uid, applied: [], skipped: labels.slice() };\ntry {\n  await new Promise((resolve, reject) => {\n    socket.once('error', reject);\n    socket.once('connect', resolve);\n  });\n  await sleep(200);\n  const authPayload = Buffer.concat([Buffer.from('\\0' + IMAP_USER + '\\0' + IMAP_PASSWORD)]).toString('base64');\n  await imapCommand(socket, 'A001', 'AUTHENTICATE PLAIN ' + authPayload);\n  await sleep(300);\n  await imapCommand(socket, 'A002', 'SELECT INBOX');\n  await sleep(200);\n  if (labels.length > 0) {\n    const labelsList = labels.map((l) => '\"' + l + '\"').join(' ');\n    await imapCommand(socket, 'A003', 'UID STORE ' + uid + ' +X-GM-LABELS.SILENT (' + labelsList + ')');\n    await sleep(200);\n    result.applied = labels.slice();\n    result.skipped = [];\n  }\n  await imapCommand(socket, 'A004', 'UID STORE ' + uid + ' +FLAGS.SILENT (\\\\Seen)');\n  await sleep(200);\n  await imapCommand(socket, 'A005', 'LOGOUT');\n} catch (e) {\n  result.error = e.message;\n} finally {\n  socket.end();\n}\n\nreturn [{\n  json: {\n    ...data,\n    _labels_applied: result.applied,\n    _labels_skipped: result.skipped,\n    _uid: uid,\n    _im_error: result.error || null,\n  },\n}];"
+        },
+        "credentials": {
+          "imap": {
+            "id": "kSNNVqVv9IVGZQja",
+            "name": "Gmail IMAP (mauricio2141)"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Extract Email Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Email Trigger (IMAP)": {
+        "main": [
+          [
+            {
+              "node": "Extract Email Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Email Fields": {
+        "main": [
+          [
+            {
+              "node": "Build Jev Body",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Jev Body": {
+        "main": [
+          [
+            {
+              "node": "Jev Classify",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Jev Classify": {
+        "main": [
+          [
+            {
+              "node": "Parse Jev",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Jev": {
+        "main": [
+          [
+            {
+              "node": "Apply Gmail Labels",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Apply Gmail Labels": {
+        "main": [
+          [
+            {
+              "node": "Respond OK",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "nodeGroups": [],
+    "authors": "Mauricio Oyarzun",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "createdAt": "2026-09-24T04:34:15.432Z",
+    "updatedAt": "2026-09-24T04:34:15.432Z",
+    "workflowPublishHistory": [
+      {
+        "id": 33,
+        "workflowId": "awBerTT0gLmPB3LM",
+        "versionId": "d401806c-2023-4688-be40-6cd9232f7817",
+        "event": "activated",
+        "userId": "ee6b48b3-3624-46bc-b15a-6d47586eb7a9",
+        "createdAt": "2026-09-24T04:34:15.774Z"
+      }
+    ]
+  }
+}
