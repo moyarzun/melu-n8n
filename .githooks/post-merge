@@ -8,15 +8,19 @@
 # Action:
 #   1. Re-run scripts/verify.sh from .cursor/skills/verify-n8n-deploy/ to
 #      confirm the merged code didn't break the live stack.
-#   2. Write a marker file at .cursor/notes/maintenance-needed.md that
+#   2. Smoke-test the n8n MCP server: spawn stdio, run tools/call
+#      n8n_health_check and n8n_list_workflows, parse JSON-RPC for
+#      "success": true.
+#   3. Write a marker file at .cursor/notes/maintenance-needed.md that
 #      the next agent invocation reads and uses to invoke
 #      /maintain-verification-skill. The skill itself requires an agent
 #      (source reading, parallel subagents, etc.) — the hook only
 #      verifies behavior, the agent does the doc/harness reconciliation.
 #
-# Disable: set TWS_SKIP_VERIFY=1 to skip the verify.sh run, TWS_NO_NOTIFY=1
-# to skip writing the marker. The hook never fails the merge — by the
-# time it runs, the merge already happened; failure here is informational.
+# Disable: TWS_SKIP_VERIFY=1 to skip verify.sh, TWS_SKIP_MCP=1 to skip
+# the MCP smoke test, TWS_NO_NOTIFY=1 to skip writing the marker. The hook
+# never fails the merge — by the time it runs, the merge already
+# happened; failure here is informational.
 
 set -u
 
@@ -24,10 +28,13 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 NOTES_DIR="${REPO_ROOT}/.cursor/notes"
 NOTES_FILE="${NOTES_DIR}/maintenance-needed.md"
 VERIFY_SH="/home/moyarzun/.cursor/skills/verify-n8n-deploy/scripts/verify.sh"
+MCP_ENV_FILE="/home/moyarzun/.config/opencode/secrets/n8n-mcp.env"
+MCP_ENTRY="/home/moyarzun/.cache/opencode/mcp-tools/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
 LOG_DIR="/tmp/opencode/twinstrand-merge-hooks"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 LOG_FILE="${LOG_DIR}/merge-${TS}.log"
 VERIFY_OUT="${LOG_DIR}/merge-${TS}.verify.txt"
+MCP_OUT="${LOG_DIR}/merge-${TS}.mcp.txt"
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
@@ -76,10 +83,94 @@ else
   fi
 fi
 
+# Smoke-test the n8n MCP server. The MCP is a stdio process; we drive it
+# with JSON-RPC and parse the response. Two probes: n8n_health_check
+# (cheap, just a ping), then n8n_list_workflows (returns actual data).
+MCP_RC=0
+MCP_HEALTH="SKIPPED"
+MCP_WORKFLOWS="SKIPPED"
+if [ "${TWS_SKIP_MCP:-0}" = "1" ]; then
+  log "mcp: skipped (TWS_SKIP_MCP=1)"
+elif [ ! -f "$MCP_ENV_FILE" ] || [ ! -x "$MCP_ENTRY" ]; then
+  log "mcp: skipped (env=$MCP_ENV_FILE entry=$MCP_ENTRY missing)"
+  MCP_RC=2
+else
+  log "mcp: running JSON-RPC smoke test..."
+  MCP_PROBE=$(bash -c '
+    set -a; . '"$MCP_ENV_FILE"'; set +a
+    {
+      echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"post-merge\",\"version\":\"1.0\"}}}"
+      sleep 1
+      echo "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"
+      sleep 1
+      echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"n8n_health_check\",\"arguments\":{}}}"
+      sleep 3
+      echo "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"n8n_list_workflows\",\"arguments\":{}}}"
+      sleep 3
+    } | timeout 18 node '"$MCP_ENTRY"' 2>/dev/null
+  ' 2>&1)
+  printf '%s' "$MCP_PROBE" > "$MCP_OUT"
+  # Parse responses. JSON field order isn't guaranteed so we use python
+  # to extract by id rather than relying on a single-line regex.
+  PROBE_FILE=$(mktemp)
+  printf '%s' "$MCP_PROBE" > "$PROBE_FILE"
+  PARSED=$(python3 - "$PROBE_FILE" 2>/dev/null <<'PY'
+import json, sys
+health_ok = None
+wf_ok = None
+wf_count = None
+with open(sys.argv[1]) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("id") == 2 and "result" in d:
+            content = d["result"].get("content", [])
+            text = content[0].get("text", "") if content else ""
+            try:
+                payload = json.loads(text)
+                health_ok = payload.get("success") is True
+            except Exception:
+                health_ok = False
+        elif d.get("id") == 3 and "result" in d:
+            content = d["result"].get("content", [])
+            text = content[0].get("text", "") if content else ""
+            try:
+                payload = json.loads(text)
+                wf_ok = payload.get("success") is True
+                wf_count = payload.get("data", {}).get("returned", "?")
+            except Exception:
+                wf_ok = False
+print("health=" + ("PASS" if health_ok is True else "FAIL"))
+print("wf=" + ("PASS" if wf_ok is True else "FAIL"))
+print("count=" + str(wf_count) if wf_count is not None else "count=?")
+PY
+)
+  rm -f "$PROBE_FILE"
+  HEALTH_LINE=$(printf '%s\n' "$PARSED" | grep '^health=' || echo "")
+  WF_LINE=$(printf '%s\n' "$PARSED" | grep '^wf=' || echo "")
+  COUNT_LINE=$(printf '%s\n' "$PARSED" | grep '^count=' || echo "count=?")
+  case "$HEALTH_LINE" in
+    health=PASS) MCP_HEALTH="PASS" ;;
+    *) MCP_HEALTH="FAIL"; MCP_RC=1 ;;
+  esac
+  case "$WF_LINE" in
+    wf=PASS) MCP_WORKFLOWS="PASS ($(echo "$COUNT_LINE" | sed 's/^count=//') workflows)" ;;
+    *) MCP_WORKFLOWS="FAIL"; MCP_RC=1 ;;
+  esac
+  log "mcp: health=$MCP_HEALTH workflows=$MCP_WORKFLOWS"
+fi
+
 # Write marker for the next agent
 if [ "${TWS_NO_NOTIFY:-0}" != "1" ]; then
   mkdir -p "$NOTES_DIR" 2>/dev/null || true
   MERGE_SUMMARY=$(git log -1 --pretty='%h %s' 2>/dev/null || echo "<unknown>")
+  VERIFY_STATUS=$([ $VERIFY_RC -eq 0 ] && echo "PASS" || echo "FAIL (exit $VERIFY_RC)")
+  MCP_STATUS=$([ $MCP_RC -eq 0 ] && echo "PASS" || echo "FAIL (exit $MCP_RC)")
   {
     echo "# Maintain verification skill — please run"
     echo ""
@@ -88,8 +179,12 @@ if [ "${TWS_NO_NOTIFY:-0}" != "1" ]; then
     echo "- **When:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- **Merge commit:** \`${MERGE_SUMMARY}\`"
     echo "- **Merged refs:** ${merge_refs:-<unknown>}"
-    echo "- **Verification result:** $([ $VERIFY_RC -eq 0 ] && echo "PASS" || echo "FAIL (exit $VERIFY_RC)")"
+    echo "- **Verification result:** $VERIFY_STATUS"
     echo "- **Verification log:** ${VERIFY_OUT}"
+    echo "- **MCP smoke test:** $MCP_STATUS"
+    echo "- **MCP health:** $MCP_HEALTH"
+    echo "- **MCP workflows:** $MCP_WORKFLOWS"
+    echo "- **MCP log:** ${MCP_OUT}"
     echo ""
     echo "## Action"
     echo ""
@@ -100,6 +195,9 @@ if [ "${TWS_NO_NOTIFY:-0}" != "1" ]; then
     echo "Until that runs, treat the verification result above as provisional:"
     echo "PASS means behavior is intact; the doc/harness may still have drifted."
     echo "FAIL means the live stack broke — investigate \`${VERIFY_OUT}\` first."
+    echo ""
+    echo "If the MCP smoke test failed, check \`${MCP_OUT}\` and the JWT in"
+    echo "\`${MCP_ENV_FILE}\` (regenerate via n8n Settings → API if it expired)."
     echo ""
     echo "## Cleanup"
     echo ""
